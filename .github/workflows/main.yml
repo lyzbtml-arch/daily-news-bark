@@ -2,6 +2,13 @@
 
 name: Daily News Bark
 
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-news-bark
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
 
@@ -12,6 +19,7 @@ on:
 jobs:
   send-news:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -25,4 +33,5 @@ jobs:
       - name: Run daily news
         env:
           BARK_URL: ${{ secrets.BARK_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python main.py
