@@ -20,6 +20,7 @@ from typing import Optional
 
 HOT_API_BASE = os.getenv("HOT_API_BASE", "https://daily-hot-api-vercel-smoky.vercel.app").rstrip("/")
 USER_AGENT = "daily-news-bark/2.0 (+https://github.com/)"
+BARK_MAX_BODY_BYTES = 2800
 
 HOT_SOURCES = (
     ("百度热搜", "baidu"),
@@ -261,14 +262,72 @@ def build_message(sections: dict[str, list[Item]]) -> str:
     return "\n".join(parts).strip()
 
 
+def split_bark_message(body: str, max_bytes: int = BARK_MAX_BODY_BYTES) -> list[str]:
+    """按 UTF-8 字节数拆分正文，并尽量保留原有换行边界。"""
+    if max_bytes <= 0:
+        raise ValueError("Bark 单条消息字节上限必须大于 0")
+    if not body:
+        return [""]
+
+    chunks: list[str] = []
+    current = ""
+    current_bytes = 0
+
+    for line in body.splitlines(keepends=True):
+        line_bytes = len(line.encode("utf-8"))
+        if line_bytes <= max_bytes:
+            if current and current_bytes + line_bytes > max_bytes:
+                chunks.append(current)
+                current = ""
+                current_bytes = 0
+            current += line
+            current_bytes += line_bytes
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+            current_bytes = 0
+        piece = ""
+        piece_bytes = 0
+        for character in line:
+            character_bytes = len(character.encode("utf-8"))
+            if piece and piece_bytes + character_bytes > max_bytes:
+                chunks.append(piece)
+                piece = ""
+                piece_bytes = 0
+            piece += character
+            piece_bytes += character_bytes
+        current = piece
+        current_bytes = piece_bytes
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _validate_bark_response(raw: bytes) -> dict[str, object]:
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Bark 返回了无法识别的响应") from exc
+    if not isinstance(result, dict) or result.get("code") != 200:
+        raise RuntimeError(f"Bark 推送失败: {result}")
+    return result
+
+
 def send_bark(title: str, body: str) -> None:
     bark_url = os.getenv("BARK_URL")
     if not bark_url:
         raise ValueError("没有设置 BARK_URL；请在 GitHub Actions Secrets 中配置")
-    payload = json.dumps({"title": title, "body": body, "group": "个人信息早报", "level": "active"}, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(bark_url, data=payload, headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as response:
-        print("Bark:", response.read().decode("utf-8"))
+    chunks = split_bark_message(body)
+    for index, chunk in enumerate(chunks, 1):
+        chunk_title = title if len(chunks) == 1 else f"{title}（{index}/{len(chunks)}）"
+        payload = json.dumps({"title": chunk_title, "body": chunk, "group": "个人信息早报", "level": "active"}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(bark_url, data=payload, headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as response:
+            result = _validate_bark_response(response.read())
+        print(f"Bark {index}/{len(chunks)}: 推送成功（code={result['code']}）")
 
 
 def collect() -> list[Item]:
